@@ -14,7 +14,7 @@ export interface ErrorValidationResponse {
 }
 
 export interface Article {
-    articleId: number;
+    articleId: string;
     hasPaid: boolean;
     amount: number;
     userPubKey: string;

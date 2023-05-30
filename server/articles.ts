@@ -4,7 +4,7 @@ import { Article } from './interfaces';
 class ArticlesManager extends EventEmitter {
     articles: Article[] = [];
 
-    payNewArticle(articleId: number, amount: number, userPubKey: string) {
+    payNewArticle(articleId: string, amount: number, userPubKey: string) {
         const article: Article = {
             articleId,
             amount,
@@ -16,8 +16,22 @@ class ArticlesManager extends EventEmitter {
         return article;
     }
 
-    paidArticlesforUser(userPubKey: string) {
-        return this.articles.filter((article) => article.userPubKey === userPubKey && article.hasPaid === true);
+    paidArticlesforUser(articleId: string) {
+        let paidArticles;
+        this.articles = this.articles.map((article) => {
+            if (article.articleId === articleId) {
+                paidArticles = { ...article, hasPaid: true };
+                return paidArticles;
+            }
+
+            return article;
+        });
+
+        if (paidArticles) {
+            this.emit(paidArticles);
+            return paidArticles;
+        }
+
     }
 }
 
