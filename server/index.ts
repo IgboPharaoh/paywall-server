@@ -1,13 +1,14 @@
 import express, { Application, Express, NextFunction, Request, Response } from 'express';
 import env from './helpers/env';
 import ArticlesManager from './articles';
-import { lnNode } from './helpers/node';
+import { lnNode, lnrpcWrapper } from './helpers/node';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import { responseError } from './helpers';
 import http from 'http';
 import routes from './routes';
 import { Server } from 'socket.io';
+import { Invoice, Readable } from '@radar/lnrpc';
 
 const app: Application = express();
 const server = http.createServer(app);
@@ -43,19 +44,64 @@ io.on('connection', (socket: any) => {
 
 export { emitSocketEvent };
 
-app.get('/', (req: Request, res: Response) => {
-    res.send(`server set up`);
+app.get('/', async (req: Request, res: Response, next) => {
+    try {
+        const info = await lnNode.getInfo();
+
+        res.send(`
+          <h1>Node info</h1>
+          <pre>${JSON.stringify(info, null, 2)}</pre>
+        `);
+
+        next();
+    } catch (err) {
+        next(err);
+    }
 });
 
-app.get('/api/pay-invoice/:articleId', async (req: Request, res: Response, next: NextFunction) => {
+app.get('/api', async (req: Request, res: Response, next) => {
     try {
-        const { userPubKey, articleId, amount } = req.body;
+
+        const stream = lnNode.subscribeInvoices() as any as Readable<Invoice>;
+        stream.on('data', (chunk) => {
+            // Skip unpaid / irrelevant invoice updates
+            if (!chunk.settled || !chunk.amtPaidSat || !chunk.memo) return;
+
+            // Extract article id
+            let articleId;
+            // `new article created #${article.articleId}`
+            if (chunk.settled && chunk.memo) {
+                articleId = chunk.memo.substring(chunk.memo.indexOf('#') + 1);
+            }
+
+            // Mark the invoice as paid!
+            const articles = ArticlesManager.paidArticlesforUser(articleId);
+
+            res.send({
+                articles: articles,
+            });
+        });
+
+        // `);
+        next();
+    } catch (err) {
+        next(err);
+    }
+});
+
+app.post('/api/pay-invoice/:articleId', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { articleId } = req.params;
+        const { userPubKey, amount } = req.body;
+
         if (!userPubKey) {
             throw new Error('User credentials are need to pay an invoice');
         }
+        console.log(userPubKey, amount, articleId);
+
         const article = ArticlesManager.payNewArticle(articleId, amount, userPubKey);
         const invoice = await lnNode.addInvoice({
-            memo: `new article created #${article.userPubKey}`,
+            memo: `new article created #${article.articleId}`,
             value: amount,
             expiry: '180',
         });
@@ -64,6 +110,7 @@ app.get('/api/pay-invoice/:articleId', async (req: Request, res: Response, next:
             data: {
                 article,
                 payReq: invoice.paymentRequest,
+                userPubKey,
             },
         });
     } catch (err) {
@@ -72,8 +119,8 @@ app.get('/api/pay-invoice/:articleId', async (req: Request, res: Response, next:
     }
 });
 
-app.get('/api/paid-articles/:id', (req: Request, res: Response) => {
-    const { userPubKey } = req.params;
+app.get('/api/paid-articles/:userPubKey', (req: Request, res: Response) => {
+    const { userPubKey } = req.body;
     const articles = ArticlesManager.paidArticlesforUser(userPubKey);
 
     if (userPubKey) {
@@ -85,6 +132,36 @@ app.get('/api/paid-articles/:id', (req: Request, res: Response) => {
     }
 });
 
-app.listen(env.PORT, () => {
-    console.log(`application is running at https://localhost:${env.PORT}`);
+lnrpcWrapper().then(() => {
+    console.log('lightning node initialized');
+    console.log('Starting server.........');
+
+    app.listen(env.PORT, () => {
+        console.log(`application is running at https://localhost:${env.PORT}`);
+    });
+
+    io.on('connection', (socket: any) => {
+        // Subscribe to all invoices, mark paid articles
+        const stream = lnNode.subscribeInvoices() as any as Readable<Invoice>;
+        stream.on('data', (chunk) => {
+            // Skip unpaid / irrelevant invoice updates
+            if (!chunk.settled || !chunk.amtPaidSat || !chunk.memo) return;
+
+            // `new article created #${article.articleId}`
+            if (chunk.settled === true && chunk.memo) {
+                socket.emit('payment-confirmed', chunk);
+            }
+
+            // Extract article id
+            let articleId;
+            if (chunk.settled && chunk.memo) {
+                const index = chunk.memo.indexOf('#');
+                articleId = chunk.memo.substring(index);
+
+                ArticlesManager.paidArticlesforUser(articleId);
+                socket.emit('payment-confirmed-with-id', { chunk, articleId });
+            }
+
+        });
+    });
 });
